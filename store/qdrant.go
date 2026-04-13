@@ -2,13 +2,17 @@ package store
 
 import (
 	"context"
+	"encoding/gob"
 	"fmt"
+	"os"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/qdrant/go-client/qdrant"
+	"github.com/yoanbernabeu/grepai/internal/fileutil"
 )
 
 // sanitizeUTF8 ensures the string contains only valid UTF-8 characters.
@@ -25,6 +29,9 @@ type QdrantStore struct {
 	collectionName string
 	dimensions     int
 	apiKey         string
+	documents      map[string]Document
+	docPath        string
+	mu             sync.RWMutex
 }
 
 func parseHost(endpoint string) string {
@@ -42,7 +49,7 @@ func parseHost(endpoint string) string {
 	return host
 }
 
-func NewQdrantStore(ctx context.Context, endpoint string, port int, useTLS bool, collection, apiKey string, dimensions int) (*QdrantStore, error) {
+func NewQdrantStore(ctx context.Context, endpoint string, port int, useTLS bool, collection, apiKey string, dimensions int, documentsPath string) (*QdrantStore, error) {
 	host := parseHost(endpoint)
 
 	if port <= 0 {
@@ -64,10 +71,16 @@ func NewQdrantStore(ctx context.Context, endpoint string, port int, useTLS bool,
 		collectionName: collection,
 		dimensions:     dimensions,
 		apiKey:         apiKey,
+		documents:      make(map[string]Document),
+		docPath:        documentsPath,
 	}
 
 	if err := store.ensureCollection(ctx); err != nil {
 		return nil, err
+	}
+
+	if err := store.Load(ctx); err != nil {
+		return nil, fmt.Errorf("failed to load documents metadata: %w", err)
 	}
 
 	return store, nil
@@ -305,77 +318,109 @@ func (s *QdrantStore) parseChunkPayload(payload map[string]*qdrant.Value) *Chunk
 }
 
 func (s *QdrantStore) GetDocument(ctx context.Context, filePath string) (*Document, error) {
-	filter := &qdrant.Filter{
-		Must: []*qdrant.Condition{
-			qdrant.NewMatch("file_path", filePath),
-		},
-	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	scrollResult, err := s.client.Scroll(ctx, &qdrant.ScrollPoints{
-		CollectionName: s.collectionName,
-		Filter:         filter,
-		Limit:          qdrant.PtrOf(uint32(1)),
-		WithPayload:    qdrant.NewWithPayloadInclude("chunk_ids"),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get document: %w", err)
-	}
-
-	if len(scrollResult) == 0 {
+	doc, ok := s.documents[filePath]
+	if !ok {
 		return nil, nil
 	}
 
-	doc := &Document{
-		Path:     filePath,
-		ChunkIDs: []string{},
-	}
-
-	return doc, nil
+	return &doc, nil
 }
 
 func (s *QdrantStore) SaveDocument(ctx context.Context, doc Document) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.documents[doc.Path] = doc
 	return nil
 }
 
 func (s *QdrantStore) DeleteDocument(ctx context.Context, filePath string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.documents, filePath)
 	return nil
 }
 
 func (s *QdrantStore) ListDocuments(ctx context.Context) ([]string, error) {
-	scrollResult, err := s.client.Scroll(ctx, &qdrant.ScrollPoints{
-		CollectionName: s.collectionName,
-		Limit:          qdrant.PtrOf(uint32(1000)),
-		WithPayload:    qdrant.NewWithPayloadInclude("file_path"),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to list documents: %w", err)
-	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	pathsMap := make(map[string]bool)
-	for _, point := range scrollResult {
-		if val, ok := point.Payload["file_path"]; ok {
-			pathsMap[val.GetStringValue()] = true
-		}
-	}
-
-	paths := make([]string, 0, len(pathsMap))
-	for path := range pathsMap {
+	paths := make([]string, 0, len(s.documents))
+	for path := range s.documents {
 		paths = append(paths, path)
 	}
 
 	return paths, nil
 }
 
+type qdrantDocData struct {
+	Documents map[string]Document
+}
+
 func (s *QdrantStore) Load(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.docPath == "" {
+		return nil
+	}
+
+	file, err := os.Open(s.docPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to open documents file: %w", err)
+	}
+	defer file.Close()
+
+	var data qdrantDocData
+	if err := gob.NewDecoder(file).Decode(&data); err != nil {
+		return fmt.Errorf("failed to decode documents: %w", err)
+	}
+
+	if data.Documents != nil {
+		s.documents = data.Documents
+	}
+
 	return nil
 }
 
 func (s *QdrantStore) Persist(ctx context.Context) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.docPath == "" {
+		return nil
+	}
+
+	if err := fileutil.EnsureParentDir(s.docPath); err != nil {
+		return fmt.Errorf("failed to prepare documents directory: %w", err)
+	}
+
+	file, err := os.Create(s.docPath)
+	if err != nil {
+		return fmt.Errorf("failed to create documents file: %w", err)
+	}
+	defer file.Close()
+
+	data := qdrantDocData{
+		Documents: s.documents,
+	}
+
+	if err := gob.NewEncoder(file).Encode(data); err != nil {
+		return fmt.Errorf("failed to encode documents: %w", err)
+	}
+
 	return nil
 }
 
 func (s *QdrantStore) Close() error {
-	return nil
+	return s.Persist(context.Background())
 }
 
 func (s *QdrantStore) GetStats(ctx context.Context) (*IndexStats, error) {

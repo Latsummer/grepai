@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -391,6 +393,177 @@ func TestQdrantStore_DimensionsField(t *testing.T) {
 				t.Errorf("expected collectionName 'test', got %s", store.collectionName)
 			}
 		})
+	}
+}
+
+// TestQdrantStore_DocumentCRUD tests SaveDocument, GetDocument, DeleteDocument, and ListDocuments
+func TestQdrantStore_DocumentCRUD(t *testing.T) {
+	tmpDir := t.TempDir()
+	docPath := filepath.Join(tmpDir, "documents.gob")
+
+	store := &QdrantStore{
+		collectionName: "test",
+		dimensions:     768,
+		documents:      make(map[string]Document),
+		docPath:        docPath,
+	}
+
+	ctx := context.Background()
+
+	// GetDocument on empty store should return nil
+	doc, err := store.GetDocument(ctx, "test.go")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if doc != nil {
+		t.Fatal("expected nil document")
+	}
+
+	// SaveDocument
+	now := time.Now()
+	err = store.SaveDocument(ctx, Document{
+		Path:     "test.go",
+		Hash:     "abc123",
+		ModTime:  now,
+		ChunkIDs: []string{"chunk1", "chunk2"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// GetDocument should return saved document
+	doc, err = store.GetDocument(ctx, "test.go")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if doc == nil {
+		t.Fatal("expected non-nil document")
+	}
+	if doc.Hash != "abc123" {
+		t.Errorf("expected hash abc123, got %s", doc.Hash)
+	}
+	if len(doc.ChunkIDs) != 2 {
+		t.Errorf("expected 2 chunk IDs, got %d", len(doc.ChunkIDs))
+	}
+
+	// ListDocuments
+	paths, err := store.ListDocuments(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(paths) != 1 || paths[0] != "test.go" {
+		t.Errorf("expected [test.go], got %v", paths)
+	}
+
+	// DeleteDocument
+	err = store.DeleteDocument(ctx, "test.go")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	doc, err = store.GetDocument(ctx, "test.go")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if doc != nil {
+		t.Fatal("expected nil after delete")
+	}
+}
+
+// TestQdrantStore_LoadPersist tests document metadata persistence via GOB file
+func TestQdrantStore_LoadPersist(t *testing.T) {
+	tmpDir := t.TempDir()
+	docPath := filepath.Join(tmpDir, "documents.gob")
+
+	ctx := context.Background()
+
+	// Create store and save a document
+	store1 := &QdrantStore{
+		collectionName: "test",
+		dimensions:     768,
+		documents:      make(map[string]Document),
+		docPath:        docPath,
+	}
+
+	now := time.Now().Truncate(time.Second)
+	_ = store1.SaveDocument(ctx, Document{
+		Path:     "main.go",
+		Hash:     "hash123",
+		ModTime:  now,
+		ChunkIDs: []string{"c1", "c2", "c3"},
+	})
+
+	// Persist to disk
+	if err := store1.Persist(ctx); err != nil {
+		t.Fatalf("persist failed: %v", err)
+	}
+
+	// Verify file exists
+	if _, err := os.Stat(docPath); os.IsNotExist(err) {
+		t.Fatal("documents.gob file was not created")
+	}
+
+	// Create a new store and load from disk
+	store2 := &QdrantStore{
+		collectionName: "test",
+		dimensions:     768,
+		documents:      make(map[string]Document),
+		docPath:        docPath,
+	}
+
+	if err := store2.Load(ctx); err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+
+	// Verify document was loaded
+	doc, err := store2.GetDocument(ctx, "main.go")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if doc == nil {
+		t.Fatal("expected non-nil document after load")
+	}
+	if doc.Hash != "hash123" {
+		t.Errorf("expected hash hash123, got %s", doc.Hash)
+	}
+	if len(doc.ChunkIDs) != 3 {
+		t.Errorf("expected 3 chunk IDs, got %d", len(doc.ChunkIDs))
+	}
+	if !doc.ModTime.Equal(now) {
+		t.Errorf("expected ModTime %v, got %v", now, doc.ModTime)
+	}
+}
+
+// TestQdrantStore_LoadNonExistentFile tests that Load handles missing file gracefully
+func TestQdrantStore_LoadNonExistentFile(t *testing.T) {
+	store := &QdrantStore{
+		collectionName: "test",
+		dimensions:     768,
+		documents:      make(map[string]Document),
+		docPath:        filepath.Join(t.TempDir(), "nonexistent.gob"),
+	}
+
+	// Load should succeed (no-op) when file doesn't exist
+	if err := store.Load(context.Background()); err != nil {
+		t.Fatalf("expected no error for nonexistent file, got %v", err)
+	}
+}
+
+// TestQdrantStore_EmptyDocPath tests that Load/Persist are no-ops when docPath is empty
+func TestQdrantStore_EmptyDocPath(t *testing.T) {
+	store := &QdrantStore{
+		collectionName: "test",
+		dimensions:     768,
+		documents:      make(map[string]Document),
+		docPath:        "",
+	}
+
+	ctx := context.Background()
+
+	if err := store.Load(ctx); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if err := store.Persist(ctx); err != nil {
+		t.Fatalf("expected no error, got %v", err)
 	}
 }
 
