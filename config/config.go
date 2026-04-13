@@ -17,6 +17,7 @@ const (
 	IndexFileName       = "index.gob"
 	SymbolIndexFileName = "symbols.gob"
 	RPGIndexFileName    = "rpg.gob"
+	DocumentsFileName   = "documents.gob"
 
 	DefaultEmbedderProvider         = "ollama"
 	DefaultOllamaEmbeddingModel     = "nomic-embed-text"
@@ -486,6 +487,10 @@ func GetSymbolIndexPath(projectRoot string) string {
 
 func GetRPGIndexPath(projectRoot string) string {
 	return filepath.Join(GetConfigDir(projectRoot), RPGIndexFileName)
+}
+
+func GetDocumentsPath(projectRoot string) string {
+	return filepath.Join(GetConfigDir(projectRoot), DocumentsFileName)
 }
 
 func Load(projectRoot string) (*Config, error) {
