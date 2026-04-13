@@ -194,6 +194,9 @@ func (idx *Indexer) IndexAllWithBatchProgress(ctx context.Context, onProgress Pr
 			}
 			stats.FilesIndexed++
 			stats.ChunksCreated += chunks
+			if stats.FilesIndexed%persistEveryNFiles == 0 {
+				_ = idx.store.Persist(ctx)
+			}
 		}
 		if onBatchProgress != nil {
 			onBatchProgress(BatchProgressInfo{
@@ -414,6 +417,9 @@ func (idx *Indexer) indexFilesBatched(
 		}
 		filesIndexed++
 		chunksCreated += len(chunks)
+		if filesIndexed%persistEveryNFiles == 0 {
+			_ = idx.store.Persist(ctx)
+		}
 	}
 
 	// Embed remaining (non-cached) files
@@ -440,11 +446,19 @@ func (idx *Indexer) indexFilesBatched(
 			}
 			filesIndexed++
 			chunksCreated += len(chunks)
+			if filesIndexed%persistEveryNFiles == 0 {
+				_ = idx.store.Persist(ctx)
+			}
 		}
 	}
 
 	return filesIndexed, chunksCreated, nil
 }
+
+// persistEveryNFiles is the number of files indexed between periodic
+// store.Persist calls during initial scan, so that document metadata
+// is not lost if the process is interrupted mid-scan.
+const persistEveryNFiles = 50
 
 // maxReChunkAttempts is the maximum number of times we'll try to re-chunk
 // before giving up on a file.
