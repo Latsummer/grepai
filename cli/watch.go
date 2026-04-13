@@ -460,7 +460,7 @@ func initializeStore(ctx context.Context, cfg *config.Config, projectRoot string
 		if collectionName == "" {
 			collectionName = store.SanitizeCollectionName(projectRoot)
 		}
-		return store.NewQdrantStore(ctx, cfg.Store.Qdrant.Endpoint, cfg.Store.Qdrant.Port, cfg.Store.Qdrant.UseTLS, collectionName, cfg.Store.Qdrant.APIKey, cfg.Embedder.GetDimensions())
+		return store.NewQdrantStore(ctx, cfg.Store.Qdrant.Endpoint, cfg.Store.Qdrant.Port, cfg.Store.Qdrant.UseTLS, collectionName, cfg.Store.Qdrant.APIKey, cfg.Embedder.GetDimensions(), config.GetDocumentsPath(projectRoot))
 	default:
 		return nil, fmt.Errorf("unknown storage backend: %s", cfg.Store.Backend)
 	}
@@ -2548,7 +2548,8 @@ func runWorkspaceWatchForeground(logDir string, ws *config.Workspace) error {
 	defer emb.Close()
 
 	// Initialize shared store with workspace-specific project ID
-	st, err := initializeWorkspaceStore(ctx, ws)
+	wsDocsPath := filepath.Join(logDir, "workspace_"+ws.Name+"_documents.gob")
+	st, err := initializeWorkspaceStore(ctx, ws, wsDocsPath)
 	if err != nil {
 		return fmt.Errorf("failed to initialize store: %w", err)
 	}
@@ -2864,7 +2865,7 @@ func initializeWorkspaceRuntime(ctx context.Context, ws *config.Workspace, proje
 	return runtime, w, nil
 }
 
-func initializeWorkspaceStore(ctx context.Context, ws *config.Workspace) (store.VectorStore, error) {
+func initializeWorkspaceStore(ctx context.Context, ws *config.Workspace, documentsPath string) (store.VectorStore, error) {
 	// Use workspace name as project ID for shared store
 	projectID := "workspace:" + ws.Name
 
@@ -2876,7 +2877,7 @@ func initializeWorkspaceStore(ctx context.Context, ws *config.Workspace) (store.
 		if collectionName == "" {
 			collectionName = "workspace_" + ws.Name
 		}
-		return store.NewQdrantStore(ctx, ws.Store.Qdrant.Endpoint, ws.Store.Qdrant.Port, ws.Store.Qdrant.UseTLS, collectionName, ws.Store.Qdrant.APIKey, ws.Embedder.GetDimensions())
+		return store.NewQdrantStore(ctx, ws.Store.Qdrant.Endpoint, ws.Store.Qdrant.Port, ws.Store.Qdrant.UseTLS, collectionName, ws.Store.Qdrant.APIKey, ws.Embedder.GetDimensions(), documentsPath)
 	default:
 		return nil, fmt.Errorf("unsupported backend for workspace: %s", ws.Store.Backend)
 	}
